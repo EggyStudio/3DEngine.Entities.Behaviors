@@ -29,7 +29,7 @@ public sealed class BehaviorsPlugin : IPlugin
     /// behavior scripts. When <see langword="null"/> (default), only compile-time
     /// <c>[GeneratedBehaviorRegistration]</c> methods are scanned and no runtime compiler is started.
     /// </summary>
-    public string? ScriptsDirectory { get; init; }
+    public string? ScriptsDirectory { get; init; } = Path.Combine(AppContext.BaseDirectory, "source", "behaviors");
 
     /// <summary>
     /// Provenance tag passed to <see cref="RuntimeBehaviorCompiler.SourceTag"/>. Used by
