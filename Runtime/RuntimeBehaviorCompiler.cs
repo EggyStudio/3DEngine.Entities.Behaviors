@@ -63,10 +63,18 @@ public sealed class RuntimeBehaviorCompiler : RuntimeAssemblyCompiler<BehaviorCo
     }
 
     /// <summary>Fluent <see cref="RuntimeAssemblyCompiler{TResult}.WatchDirectory"/> typed for chaining.</summary>
-    public new RuntimeBehaviorCompiler WatchDirectory(string path) { base.WatchDirectory(path); return this; }
+    public new RuntimeBehaviorCompiler WatchDirectory(string path)
+    {
+        base.WatchDirectory(path);
+        return this;
+    }
 
     /// <summary>Fluent <see cref="RuntimeAssemblyCompiler{TResult}.AddReference(Assembly)"/> typed for chaining.</summary>
-    public new RuntimeBehaviorCompiler AddReference(Assembly assembly) { base.AddReference(assembly); return this; }
+    public new RuntimeBehaviorCompiler AddReference(Assembly assembly)
+    {
+        base.AddReference(assembly);
+        return this;
+    }
 
     /// <inheritdoc />
     protected override void OnNoSourceFiles(BehaviorCompilationResult result)
@@ -128,7 +136,8 @@ public sealed class RuntimeBehaviorCompiler : RuntimeAssemblyCompiler<BehaviorCo
     }
 
     /// <inheritdoc />
-    protected override void OnAssemblyLoaded(Assembly assembly, IReadOnlyList<string> cssFiles, BehaviorCompilationResult result)
+    protected override void OnAssemblyLoaded(Assembly assembly, IReadOnlyList<string> cssFiles,
+        BehaviorCompilationResult result)
     {
         // 1) Drop the previous generation's hot-reloaded systems before registering the new ones.
         var removed = _app.RemoveSystemsBySource(SourceTag);
@@ -171,7 +180,10 @@ public sealed class RuntimeBehaviorCompiler : RuntimeAssemblyCompiler<BehaviorCo
 
     private static IEnumerable<Type> SafeGetTypes(Assembly asm, BehaviorCompilationResult result)
     {
-        try { return asm.GetTypes(); }
+        try
+        {
+            return asm.GetTypes();
+        }
         catch (ReflectionTypeLoadException ex)
         {
             result.Warnings.Add($"Type load failures: {ex.LoaderExceptions.Length}");
@@ -179,4 +191,3 @@ public sealed class RuntimeBehaviorCompiler : RuntimeAssemblyCompiler<BehaviorCo
         }
     }
 }
-

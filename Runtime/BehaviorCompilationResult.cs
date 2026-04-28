@@ -10,4 +10,3 @@ public sealed class BehaviorCompilationResult : Engine.Files.Compiler.RuntimeCom
     /// <summary>Number of <c>[Behavior]</c>-derived systems registered into the <see cref="App"/> for this generation.</summary>
     public int RegisteredCount { get; set; }
 }
-
