@@ -1,9 +1,4 @@
-using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
 using Microsoft.CodeAnalysis;
-using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 
 namespace Engine;
@@ -11,19 +6,20 @@ namespace Engine;
 /// <summary>Roslyn incremental generator scanning [Engine.Behavior] structs and emitting stage systems plus a registration function discoverable at runtime.</summary>
 /// <remarks>
 /// <para>
-/// This generator runs at compile-time and produces two kinds of source outputs:
+/// Produces two kinds of source outputs:
 /// <list type="number">
-///   <item><description>Per-behavior <c>{Name}_Generated.g.cs</c> files containing system lambdas for each stage method.</description></item>
+///   <item><description>Per-behavior <c>{Name}_Generated.g.cs</c> files containing system functions for each stage method.</description></item>
 ///   <item><description>A single <c>BehaviorsRegistration.g.cs</c> file marked with <c>[GeneratedBehaviorRegistration]</c>,
 ///     discoverable by <c>BehaviorsPlugin</c> at runtime via reflection.</description></item>
 /// </list>
 /// </para>
 /// <para>
-/// The private record types <c>BehaviorModel</c>, <c>StageMethod</c>, and <c>Filters</c> form the
-/// intermediate representation between Roslyn syntax analysis and source generation.
+/// Code emission uses C# 11 raw string literals. The closing <c>"""</c> sits at column 0
+/// so every template's content is authored with its real output indentation. Small helpers
+/// (<see cref="BuildDescriptor"/>, <see cref="GenStageMethod"/>, <see cref="GenFilterHoist"/>,
+/// <see cref="GenFilterChecks"/>) compose the larger templates.
 /// </para>
 /// </remarks>
-/// <seealso cref="Stage"/>
 [Generator(LanguageNames.CSharp)]
 public sealed class BehaviorGenerator : IIncrementalGenerator
 {
@@ -31,72 +27,64 @@ public sealed class BehaviorGenerator : IIncrementalGenerator
     public void Initialize(IncrementalGeneratorInitializationContext ctx)
     {
         var candidates = ctx.SyntaxProvider.CreateSyntaxProvider(
-            static (node, _) => node is StructDeclarationSyntax sds && sds.AttributeLists.Count > 0,
-            static (context, _) =>
-            {
-                var sds = (StructDeclarationSyntax)context.Node;
-                var type = context.SemanticModel.GetDeclaredSymbol(sds);
-                if (type is null) return null;
-                foreach (var a in type.GetAttributes())
-                    if (a.AttributeClass?.ToDisplayString() == "Engine.BehaviorAttribute")
-                        return type;
-                return null;
-            })
+                static (node, _) => node is StructDeclarationSyntax sds && sds.AttributeLists.Count > 0,
+                static (context, _) =>
+                {
+                    var sds = (StructDeclarationSyntax)context.Node;
+                    var type = context.SemanticModel.GetDeclaredSymbol(sds);
+                    if (type is null) return null;
+                    foreach (var a in type.GetAttributes())
+                        if (a.AttributeClass?.ToDisplayString() == "Engine.BehaviorAttribute")
+                            return type;
+                    return null;
+                })
             .Where(s => s is not null)
             .Collect();
 
-        var compilationAndTypes = ctx.CompilationProvider.Combine(candidates);
-        ctx.RegisterSourceOutput(compilationAndTypes, (spc, pair) =>
+        ctx.RegisterSourceOutput(ctx.CompilationProvider.Combine(candidates), (spc, pair) =>
         {
-            var (compilation, types) = pair;
-            var behaviors = new List<BehaviorModel>();
-            foreach (var t in types)
-            {
-                if (t is null) continue;
-                behaviors.Add(BuildModel(t));
-            }
+            var behaviors = pair.Right
+                .OfType<INamedTypeSymbol>()
+                .Select(BuildModel)
+                .ToList();
 
-            // Emit per-behavior systems
             foreach (var b in behaviors)
                 spc.AddSource($"{b.SafeName}.g.cs", GenBehaviorSystems(b));
 
-            // Emit a single registration function discoverable by BehaviorsPlugin via attribute.
             if (behaviors.Count > 0)
                 spc.AddSource("BehaviorsRegistration.g.cs", GenRegistration(behaviors));
         });
     }
 
+    // -- Model extraction --
+
     /// <summary>Builds a behavior model (namespace, name, stage methods, filters) from a type symbol.</summary>
     private static BehaviorModel BuildModel(INamedTypeSymbol type)
     {
         var ns = type.ContainingNamespace.IsGlobalNamespace ? "Engine" : type.ContainingNamespace.ToDisplayString();
-        var name = type.Name;
-        var safe = name + "_Generated"; // ensure uniqueness per behavior type
-        var methods = new List<StageMethod>();
-
-        foreach (var m in type.GetMembers().OfType<IMethodSymbol>())
-        {
-            Stage? stage = GetStage(m);
-            if (stage is null) continue;
-            methods.Add(new StageMethod
+        var methods = type.GetMembers()
+            .OfType<IMethodSymbol>()
+            .Select(m => (Method: m, Stage: GetStage(m)))
+            .Where(x => x.Stage is not null)
+            .Select(x => new StageMethod
             {
-                Stage = stage.Value,
-                IsStatic = m.IsStatic,
+                Stage = x.Stage!.Value,
+                IsStatic = x.Method.IsStatic,
                 MethodContainer = type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat),
-                MethodName = m.Name,
-                Filters = GetFilters(m),
-                RunIf = GetRunIf(m, type),
-                ToggleKey = GetToggleKey(m),
-            });
-        }
+                MethodName = x.Method.Name,
+                Filters = GetFilters(x.Method),
+                RunIf = GetRunIf(x.Method, type),
+                ToggleKey = GetToggleKey(x.Method),
+            })
+            .ToList();
 
         return new BehaviorModel
         {
             Namespace = ns,
-            Name = name,
-            SafeName = safe,
+            Name = type.Name,
+            SafeName = type.Name + "_Generated",
             BehaviorFqn = type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat),
-            StageMethods = methods
+            StageMethods = methods,
         };
     }
 
@@ -105,16 +93,19 @@ public sealed class BehaviorGenerator : IIncrementalGenerator
     {
         foreach (var a in m.GetAttributes())
         {
-            var n = a.AttributeClass?.ToDisplayString();
-            if (n == "Engine.OnStartupAttribute") return Stage.Startup;
-            if (n == "Engine.OnFirstAttribute") return Stage.First;
-            if (n == "Engine.OnPreUpdateAttribute") return Stage.PreUpdate;
-            if (n == "Engine.OnUpdateAttribute") return Stage.Update;
-            if (n == "Engine.OnPostUpdateAttribute") return Stage.PostUpdate;
-            if (n == "Engine.OnRenderAttribute") return Stage.Render;
-            if (n == "Engine.OnLastAttribute") return Stage.Last;
-            if (n == "Engine.OnCleanupAttribute") return Stage.Cleanup;
+            switch (a.AttributeClass?.ToDisplayString())
+            {
+                case "Engine.OnStartupAttribute": return Stage.Startup;
+                case "Engine.OnFirstAttribute": return Stage.First;
+                case "Engine.OnPreUpdateAttribute": return Stage.PreUpdate;
+                case "Engine.OnUpdateAttribute": return Stage.Update;
+                case "Engine.OnPostUpdateAttribute": return Stage.PostUpdate;
+                case "Engine.OnRenderAttribute": return Stage.Render;
+                case "Engine.OnLastAttribute": return Stage.Last;
+                case "Engine.OnCleanupAttribute": return Stage.Cleanup;
+            }
         }
+
         return null;
     }
 
@@ -124,38 +115,27 @@ public sealed class BehaviorGenerator : IIncrementalGenerator
         var with = new List<string>();
         var without = new List<string>();
         var changed = new List<string>();
-        foreach (var a in m.GetAttributes()) 
+        foreach (var a in m.GetAttributes())
         {
-            var n = a.AttributeClass?.ToDisplayString();
-            if (n == "Engine.WithAttribute")
+            var bucket = a.AttributeClass?.ToDisplayString() switch
             {
-                if (a.ConstructorArguments.Length > 0)
-                    foreach (var v in a.ConstructorArguments[0].Values)
-                        if (v.Value is ITypeSymbol ts)
-                            with.Add(ts.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat));
-            }
-            else if (n == "Engine.WithoutAttribute")
-            {
-                if (a.ConstructorArguments.Length > 0)
-                    foreach (var v in a.ConstructorArguments[0].Values)
-                        if (v.Value is ITypeSymbol ts)
-                            without.Add(ts.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat));
-            }
-            else if (n == "Engine.ChangedAttribute")
-            {
-                if (a.ConstructorArguments.Length > 0)
-                    foreach (var v in a.ConstructorArguments[0].Values)
-                        if (v.Value is ITypeSymbol ts)
-                            changed.Add(ts.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat));
-            }
+                "Engine.WithAttribute" => with,
+                "Engine.WithoutAttribute" => without,
+                "Engine.ChangedAttribute" => changed,
+                _ => null,
+            };
+            if (bucket is null || a.ConstructorArguments.Length == 0) continue;
+            foreach (var v in a.ConstructorArguments[0].Values)
+                if (v.Value is ITypeSymbol ts)
+                    bucket.Add(ts.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat));
         }
+
         return new Filters(with, without, changed);
     }
 
     /// <summary>Extracts the [RunIf] condition member (method/property/field) info from a method's attributes.</summary>
     private static (string Name, MemberKind Kind)? GetRunIf(IMethodSymbol method, INamedTypeSymbol behaviorType)
     {
-        // Get the attribute name
         string? attrName = null;
         foreach (var a in method.GetAttributes())
         {
@@ -170,24 +150,24 @@ public sealed class BehaviorGenerator : IIncrementalGenerator
 
         if (attrName is null) return null;
 
-        // Find the member in the behavior type
         foreach (var member in behaviorType.GetMembers())
         {
             if (member.Name != attrName) continue;
-
-            if (member is IMethodSymbol)
-                return (attrName, MemberKind.Method);
-            else if (member is IPropertySymbol)
-                return (attrName, MemberKind.Property);
-            else if (member is IFieldSymbol)
-                return (attrName, MemberKind.Field);
+            if (member is IMethodSymbol) return (attrName, MemberKind.Method);
+            if (member is IPropertySymbol) return (attrName, MemberKind.Property);
+            if (member is IFieldSymbol) return (attrName, MemberKind.Field);
         }
 
-        return null; // Member not found
+        return null;
     }
 
     /// <summary>Classifies the kind of member referenced by a [RunIf] attribute.</summary>
-    private enum MemberKind { Method, Property, Field }
+    private enum MemberKind
+    {
+        Method,
+        Property,
+        Field
+    }
 
     /// <summary>Extracts the [ToggleKey] key+modifier pair as raw integers, or null if absent.</summary>
     private static (int Key, int Modifier, bool DefaultEnabled)? GetToggleKey(IMethodSymbol m)
@@ -199,248 +179,248 @@ public sealed class BehaviorGenerator : IIncrementalGenerator
             var mod = a.ConstructorArguments.Length > 1 && a.ConstructorArguments[1].Value is int mo ? mo : 0;
             var def = true;
             foreach (var na in a.NamedArguments)
-                if (na.Key == "DefaultEnabled" && na.Value.Value is bool b)
-                    def = b;
+                if (na.Key == "DefaultEnabled" && na.Value.Value is bool bb)
+                    def = bb;
             return (key, mod, def);
         }
+
         return null;
     }
+
+    // -- Source emission --
 
     /// <summary>Generates per-stage system functions and a static Register helper for one behavior.</summary>
     private static string GenBehaviorSystems(BehaviorModel b)
     {
-        var sb = new StringBuilder();
-        sb.AppendLine("// <auto-generated />");
-        sb.AppendLine($"namespace {b.Namespace};");
-        sb.AppendLine();
-        sb.AppendLine($"internal static class {b.SafeName}");
-        sb.AppendLine("{");
-        sb.AppendLine("    public static void Register(Engine.App app)");
-        sb.AppendLine("    {");
-        foreach (var g in b.StageMethods.GroupBy(m => m.Stage))
-        {
-            var first = g.First();
-            var systemId = $"{b.SafeName}_{g.Key}";
+        var registerCalls = string.Concat(b.StageMethods
+            .GroupBy(m => m.Stage)
+            .Select(g =>
+                $"        app.AddSystem(Engine.Stage.{g.Key}, {BuildDescriptor(b, g.Key, g.First(), g.Any(m => !m.IsStatic))});\n"));
 
-            // Fine-grained resource access: instance behaviors write only to their own
-            // component store type; static-only behaviors declare a read on EcsWorld.
-            // This prevents false write/write conflicts between unrelated behavior types,
-            // allowing the parallel scheduler to batch them together.
-            bool hasInstanceMethod = g.Any(m => !m.IsStatic);
-            string accessMetadata = hasInstanceMethod
-                ? $".Write<{b.BehaviorFqn}>()"
-                : $".Read<global::Engine.EcsWorld>()";
+        var stageMethods = string.Concat(b.StageMethods.Select(m => "\n" + GenStageMethod(b, m)));
 
-            string desc;
-            if (first.ToggleKey is var (k, mod, defEnabled))
-            {
-                desc = $"new global::Engine.SystemDescriptor({systemId}, \"{systemId}\")" +
-                       $".RunIf(global::Engine.BehaviorConditions.KeyToggle(\"{systemId}\", (global::Engine.Key){k}, (global::Engine.KeyModifier){mod}, {(defEnabled ? "true" : "false")}))" +
-                       accessMetadata;
-            }
-            else if (first.RunIf is var (name, kind))
-            {
-                string runIfExpr = kind switch
-                {
-                    MemberKind.Method => $"{b.BehaviorFqn}.{name}",
-                    MemberKind.Property => $"_ => {b.BehaviorFqn}.{name}",
-                    MemberKind.Field => $"_ => {b.BehaviorFqn}.{name}",
-                    _ => throw new InvalidOperationException($"Unknown member kind: {kind}")
-                };
-                desc = $"new global::Engine.SystemDescriptor({systemId}, \"{systemId}\")" +
-                       $".RunIf({runIfExpr})" +
-                       accessMetadata;
-            }
-            else
-            {
-                desc = $"new global::Engine.SystemDescriptor({systemId}, \"{systemId}\"){accessMetadata}";
-            }
-            sb.AppendLine($"        app.AddSystem(Engine.Stage.{g.Key}, {desc});");
-        }
-        sb.AppendLine("    }");
-        foreach (var m in b.StageMethods)
-        {
-            sb.AppendLine();
-            sb.AppendLine($"    private static void {b.SafeName}_{m.Stage}(Engine.World world)");
-            sb.AppendLine("    {");
-            if (m.IsStatic)
-            {
-                sb.AppendLine("        var ctx = new Engine.BehaviorContext(world);");
-                sb.AppendLine($"        {m.MethodContainer}.{m.MethodName}(ctx);");
-                sb.AppendLine("    }");
-                continue;
-            }
-            // non-static: ref-based iteration with direct array access.
-            // Optimizations applied (Arch/Bevy ECS patterns):
-            //  1. Pre-resolve all World resources once (avoid ConcurrentDictionary lookups per thread/chunk)
-            //  2. Direct array access + ref var (no struct copies, no method call overhead)
-            //  3. Hoisted filter store lookups (avoid GetStore indirection per entity)
-            //  4. Chunked range partitioning via Parallel.ForEach + Partitioner.Create
-            //     (one delegate + one BehaviorContext per chunk, contiguous cache-linear access)
-            sb.AppendLine("        var ecs = world.Resource<Engine.EcsWorld>();");
-            sb.AppendLine("        var __cmd = world.Resource<Engine.EcsCommands>();");
-            sb.AppendLine("        var __time = world.Resource<Engine.Time>();");
-            sb.AppendLine("        var __input = world.Resource<Engine.Input>();");
-            sb.AppendLine($"        var __store = ecs.GetStorePublic<{b.BehaviorFqn}>();");
-            sb.AppendLine("        var __count = __store.Count;");
-            sb.AppendLine("        if (__count == 0) return;");
-            sb.AppendLine("        var __entities = __store.EntitiesArray;");
-            sb.AppendLine("        var __components = __store.ComponentsArray;");
+        return
+            $$"""
+              // <auto-generated />
+              namespace {{b.Namespace}};
 
-            bool hasFilters = m.Filters.With.Count > 0 || m.Filters.Without.Count > 0 || m.Filters.Changed.Count > 0;
-            if (hasFilters)
-                sb.Append(GenFilterHoist(m.Filters));
+              internal static class {{b.SafeName}}
+              {
+                  public static void Register(Engine.App app)
+                  {
+                      {{registerCalls}}    
+                  }
+                  {{stageMethods}}
+              }
 
-            // Parallel path: chunked range partitioning with one BehaviorContext per chunk
-            sb.AppendLine("        if (__count >= 4096)");
-            sb.AppendLine("        {");
-            sb.AppendLine("            System.Threading.Tasks.Parallel.ForEach(");
-            sb.AppendLine("                System.Collections.Concurrent.Partitioner.Create(0, __count,");
-            sb.AppendLine("                    System.Math.Max(256, __count / (System.Environment.ProcessorCount * 4))),");
-            sb.AppendLine("                __range =>");
-            sb.AppendLine("                {");
-            sb.AppendLine("                    var ctx = new Engine.BehaviorContext(world, ecs, __cmd, __time, __input);");
-            sb.AppendLine("                    for (int __i = __range.Item1; __i < __range.Item2; __i++)");
-            sb.AppendLine("                    {");
-            sb.AppendLine("                        int entity = __entities[__i];");
-            if (hasFilters)
-                sb.Append(GenFilterChecks(m.Filters, "continue", "                        "));
-            sb.AppendLine("                        ctx.EntityId = entity;");
-            sb.AppendLine($"                        ref var behv = ref __components[__i];");
-            sb.AppendLine($"                        behv.{m.MethodName}(ctx);");
-            sb.AppendLine("                    }");
-            sb.AppendLine("                }");
-            sb.AppendLine("            );");
-            sb.AppendLine("        }");
-
-            // Sequential path: cache-linear for small entity counts
-            sb.AppendLine("        else");
-            sb.AppendLine("        {");
-            sb.AppendLine("            var ctx = new Engine.BehaviorContext(world, ecs, __cmd, __time, __input);");
-            sb.AppendLine($"            for (int __i = 0; __i < __count; __i++)");
-            sb.AppendLine("            {");
-            sb.AppendLine("                int entity = __entities[__i];");
-            if (hasFilters)
-                sb.Append(GenFilterChecks(m.Filters, "continue", "                "));
-            sb.AppendLine("                ctx.EntityId = entity;");
-            sb.AppendLine($"                ref var behv = ref __components[__i];");
-            sb.AppendLine($"                behv.{m.MethodName}(ctx);");
-            sb.AppendLine("            }");
-            sb.AppendLine("        }");
-            sb.AppendLine("    }");
-        }
-        sb.AppendLine("}");
-        return sb.ToString();
+              """;
     }
 
-    /// <summary>Generates a foreach header for multi-component queries (retained for future use with [With] filter joins).</summary>
-    private static string GenForeachHeader(string behaviorFqn, IReadOnlyList<string> with)
+    /// <summary>Builds the <c>SystemDescriptor</c> chained-call expression for one stage group.</summary>
+    /// <remarks>
+    /// Fine-grained resource access: instance behaviors write only to their own component
+    /// store type; static-only behaviors declare a read on EcsWorld. This prevents false
+    /// write/write conflicts between unrelated behavior types, allowing the parallel
+    /// scheduler to batch them together.
+    /// </remarks>
+    private static string BuildDescriptor(BehaviorModel b, Stage stage, StageMethod first, bool hasInstanceMethod)
     {
-        // Prefer joining via typed queries when up to 3 with-filters are present, else fallback to single-type scan.
-        return with.Count switch
+        var systemId = $"{b.SafeName}_{stage}";
+        var access = hasInstanceMethod
+            ? $".Write<{b.BehaviorFqn}>()"
+            : ".Read<global::Engine.EcsWorld>()";
+        var ctor = $"new global::Engine.SystemDescriptor({systemId}, \"{systemId}\")";
+
+        if (first.ToggleKey is { } tk)
         {
-            0 => $"        foreach (var (entity, behv) in ecs.Query<{behaviorFqn}>())\n        {{",
-            1 => $"        foreach (var (entity, behv, __w1) in ecs.Query<{behaviorFqn}, {with[0]}>())\n        {{",
-            2 => $"        foreach (var (entity, behv, __w1, __w2) in ecs.Query<{behaviorFqn}, {with[0]}, {with[1]}>())\n        {{",
-            3 => $"        foreach (var (entity, behv, __w1, __w2, __w3) in ecs.Query<{behaviorFqn}, {with[0]}, {with[1]}, {with[2]}>())\n        {{",
-            _ => $"        foreach (var (entity, behv) in ecs.Query<{behaviorFqn}>())\n        {{",
-        };
+            var def = tk.DefaultEnabled ? "true" : "false";
+            return
+                $"{ctor}.RunIf(global::Engine.BehaviorConditions.KeyToggle(\"{systemId}\", (global::Engine.Key){tk.Key}, (global::Engine.KeyModifier){tk.Modifier}, {def})){access}";
+        }
+
+        if (first.RunIf is { } ri)
+        {
+            var expr = ri.Kind == MemberKind.Method
+                ? $"{b.BehaviorFqn}.{ri.Name}"
+                : $"_ => {b.BehaviorFqn}.{ri.Name}";
+            return $"{ctor}.RunIf({expr}){access}";
+        }
+
+        return $"{ctor}{access}";
+    }
+
+    /// <summary>Generates the per-stage system method body (static dispatch or chunked parallel iteration).</summary>
+    /// <remarks>
+    /// Non-static optimizations applied (Arch/Bevy ECS patterns):
+    /// <list type="number">
+    ///   <item><description>Pre-resolve all World resources once (avoid ConcurrentDictionary lookups per thread/chunk).</description></item>
+    ///   <item><description>Direct array access + ref var (no struct copies, no method call overhead).</description></item>
+    ///   <item><description>Hoisted filter store lookups (avoid GetStore indirection per entity).</description></item>
+    ///   <item><description>Chunked range partitioning via Parallel.ForEach + Partitioner.Create.</description></item>
+    /// </list>
+    /// </remarks>
+    private static string GenStageMethod(BehaviorModel b, StageMethod m)
+    {
+        var name = $"{b.SafeName}_{m.Stage}";
+
+        if (m.IsStatic)
+        {
+            return
+                $$"""
+                      private static void {{name}}(Engine.World world)
+                      {
+                          var ctx = new Engine.BehaviorContext(world);
+                          {{m.MethodContainer}}.{{m.MethodName}}(ctx);
+                      }
+                  """;
+        }
+
+        var hasFilters = m.Filters.With.Count + m.Filters.Without.Count + m.Filters.Changed.Count > 0;
+        var hoist = hasFilters ? GenFilterHoist(m.Filters, "        ") : "";
+        var parChecks = hasFilters ? GenFilterChecks(m.Filters, "                        ") : "";
+        var seqChecks = hasFilters ? GenFilterChecks(m.Filters, "                ") : "";
+
+        return
+            $$"""
+                  private static void {{name}}(Engine.World world)
+                  {
+                      var ecs = world.Resource<Engine.EcsWorld>();
+                      var __cmd = world.Resource<Engine.EcsCommands>();
+                      var __time = world.Resource<Engine.Time>();
+                      var __input = world.Resource<Engine.Input>();
+                      var __store = ecs.GetStorePublic<{{b.BehaviorFqn}}>();
+                      var __count = __store.Count;
+                      if (__count == 0) return;
+                      var __entities = __store.EntitiesArray;
+                      var __components = __store.ComponentsArray;
+                      {{hoist}}        
+                      if (__count >= 4096)
+                      {
+                          System.Threading.Tasks.Parallel.ForEach(
+                              System.Collections.Concurrent.Partitioner.Create(0, __count,
+                                  System.Math.Max(256, __count / (System.Environment.ProcessorCount * 4))),
+                              __range =>
+                              {
+                                  var ctx = new Engine.BehaviorContext(world, ecs, __cmd, __time, __input);
+                                  for (int __i = __range.Item1; __i < __range.Item2; __i++)
+                                  {
+                                      int entity = __entities[__i];
+                                      {{parChecks}}                        
+                                      ctx.EntityId = entity;
+                                      ref var behv = ref __components[__i];
+                                      behv.{{m.MethodName}}(ctx);
+                                  }
+                              }
+                          );
+                      }
+                      else
+                      {
+                          var ctx = new Engine.BehaviorContext(world, ecs, __cmd, __time, __input);
+                          for (int __i = 0; __i < __count; __i++)
+                          {
+                              int entity = __entities[__i];
+                              {{seqChecks}}                
+                              ctx.EntityId = entity;
+                              ref var behv = ref __components[__i];
+                              behv.{{m.MethodName}}(ctx);
+                          }
+                      }
+                  }
+              """;
     }
 
     /// <summary>Emits variable declarations that hoist filter store lookups out of the hot loop.</summary>
-    /// <param name="f">The filter configuration.</param>
-    /// <param name="indent">Indentation prefix for each line.</param>
-    /// <returns>Source code declaring <c>__fWith0</c>, <c>__fWout0</c>, <c>__fChg0</c>, etc.</returns>
-    private static string GenFilterHoist(Filters f, string indent = "        ")
+    private static string GenFilterHoist(Filters f, string indent)
     {
-        var sb = new StringBuilder();
-        int idx = 0;
-        foreach (var w in f.With)
-            sb.AppendLine($"{indent}var __fWith{idx++} = ecs.GetStorePublic<{w}>();");
-        idx = 0;
-        foreach (var wout in f.Without)
-            sb.AppendLine($"{indent}var __fWout{idx++} = ecs.GetStorePublic<{wout}>();");
-        idx = 0;
-        foreach (var ch in f.Changed)
-            sb.AppendLine($"{indent}var __fChg{idx++} = ecs.GetStorePublic<{ch}>();");
-        return sb.ToString();
+        var lines = new List<string>();
+        for (int i = 0; i < f.With.Count; i++)
+            lines.Add($"{indent}var __fWith{i} = ecs.GetStorePublic<{f.With[i]}>();");
+        for (int i = 0; i < f.Without.Count; i++)
+            lines.Add($"{indent}var __fWout{i} = ecs.GetStorePublic<{f.Without[i]}>();");
+        for (int i = 0; i < f.Changed.Count; i++)
+            lines.Add($"{indent}var __fChg{i} = ecs.GetStorePublic<{f.Changed[i]}>();");
+        return lines.Count == 0 ? "" : string.Join("\n", lines) + "\n";
     }
 
     /// <summary>Emits per-entity filter checks using the hoisted store variables from <see cref="GenFilterHoist"/>.</summary>
-    private static string GenFilterChecks(Filters f, string skipStatement = "continue", string indent = "            ")
+    private static string GenFilterChecks(Filters f, string indent, string skip = "continue")
     {
-        var sb = new StringBuilder();
-        int idx = 0;
-        foreach (var w in f.With)
-            sb.AppendLine($"{indent}if (!__fWith{idx++}.Has(entity)) {skipStatement};");
-        idx = 0;
-        foreach (var wout in f.Without)
-            sb.AppendLine($"{indent}if (__fWout{idx++}.Has(entity)) {skipStatement};");
-        idx = 0;
-        foreach (var ch in f.Changed)
-            sb.AppendLine($"{indent}if (!__fChg{idx++}.ChangedThisFrame(entity, 0)) {skipStatement};");
-        return sb.ToString();
+        var lines = new List<string>();
+        for (int i = 0; i < f.With.Count; i++)
+            lines.Add($"{indent}if (!__fWith{i}.Has(entity)) {skip};");
+        for (int i = 0; i < f.Without.Count; i++)
+            lines.Add($"{indent}if (__fWout{i}.Has(entity)) {skip};");
+        for (int i = 0; i < f.Changed.Count; i++)
+            lines.Add($"{indent}if (!__fChg{i}.ChangedThisFrame(entity, 0)) {skip};");
+        return lines.Count == 0 ? "" : string.Join("\n", lines) + "\n";
     }
 
     /// <summary>Emits a registration method marked with [GeneratedBehaviorRegistration] that registers all discovered behaviors.</summary>
     private static string GenRegistration(IEnumerable<BehaviorModel> behaviors)
     {
-        var sb = new StringBuilder();
-        sb.AppendLine("// <auto-generated />");
-        sb.AppendLine("namespace Engine;");
-        sb.AppendLine();
-        sb.AppendLine("public static class BehaviorRegistration");
-        sb.AppendLine("{");
-        sb.AppendLine("    [global::Engine.GeneratedBehaviorRegistration]");
-        sb.AppendLine("    public static void Register(global::Engine.App app)");
-        sb.AppendLine("    {");
-        foreach (var b in behaviors)
-            sb.AppendLine($"        global::{b.Namespace}.{b.SafeName}.Register(app);");
-        sb.AppendLine("    }");
-        sb.AppendLine("}");
-        return sb.ToString();
+        var calls = string.Concat(behaviors.Select(b =>
+            $"        global::{b.Namespace}.{b.SafeName}.Register(app);\n"));
+
+        return
+            $$"""
+              // <auto-generated />
+              namespace Engine;
+
+              public static class BehaviorRegistration
+              {
+                  [global::Engine.GeneratedBehaviorRegistration]
+                  public static void Register(global::Engine.App app)
+                  {
+                      {{calls}}    
+                  }
+              }
+
+              """;
     }
 
+    // -- Intermediate representation --
+
     /// <summary>Scheduling stage for generated system registration.</summary>
-    private enum Stage { Startup, First, PreUpdate, Update, PostUpdate, Render, Last, Cleanup }
+    private enum Stage
+    {
+        Startup,
+        First,
+        PreUpdate,
+        Update,
+        PostUpdate,
+        Render,
+        Last,
+        Cleanup
+    }
 
     /// <summary>Component filter configuration extracted from [With], [Without], [Changed] attributes.</summary>
-    /// <param name="With">Component types that must be present on the entity.</param>
-    /// <param name="Without">Component types that must be absent from the entity.</param>
-    /// <param name="Changed">Component types that must have been modified since the last frame.</param>
-    private sealed record Filters(IReadOnlyList<string> With, IReadOnlyList<string> Without, IReadOnlyList<string> Changed);
+    private sealed record Filters(
+        IReadOnlyList<string> With,
+        IReadOnlyList<string> Without,
+        IReadOnlyList<string> Changed);
 
     /// <summary>Represents a single stage-annotated method within a behavior struct.</summary>
     private sealed record StageMethod
     {
-        /// <summary>The scheduling stage this method runs in.</summary>
         public Stage Stage { get; init; }
-        /// <summary>Whether the method is static (global) or instance (per-entity).</summary>
         public bool IsStatic { get; init; }
-        /// <summary>Fully-qualified name of the type containing the method.</summary>
         public string MethodContainer { get; init; } = string.Empty;
-        /// <summary>Simple name of the method.</summary>
         public string MethodName { get; init; } = string.Empty;
-        /// <summary>Component filters applied to this method.</summary>
-        public Filters Filters { get; init; } = new Filters(Array.Empty<string>(), Array.Empty<string>(), Array.Empty<string>());
-        /// <summary>Optional [RunIf] condition reference (member name and kind).</summary>
+
+        public Filters Filters { get; init; } =
+            new(Array.Empty<string>(), Array.Empty<string>(), Array.Empty<string>());
+
         public (string Name, MemberKind Kind)? RunIf { get; init; }
-        /// <summary>Optional [ToggleKey] key binding (key code, modifier, default enabled state).</summary>
         public (int Key, int Modifier, bool DefaultEnabled)? ToggleKey { get; init; }
     }
 
     /// <summary>Aggregated model for a single [Behavior]-annotated struct and its stage methods.</summary>
     private sealed record BehaviorModel
     {
-        /// <summary>Namespace of the behavior type.</summary>
         public string Namespace { get; init; } = "Engine";
-        /// <summary>Simple type name of the behavior struct.</summary>
         public string Name { get; init; } = string.Empty;
-        /// <summary>Generated helper class name (unique per behavior).</summary>
         public string SafeName { get; init; } = string.Empty;
-        /// <summary>Fully-qualified name of the behavior struct.</summary>
         public string BehaviorFqn { get; init; } = string.Empty;
-        /// <summary>All stage-annotated methods discovered on this behavior.</summary>
         public List<StageMethod> StageMethods { get; init; } = new();
     }
 }
