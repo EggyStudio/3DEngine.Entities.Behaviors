@@ -13,12 +13,6 @@ namespace Engine;
 ///     discoverable by <c>BehaviorsPlugin</c> at runtime via reflection.</description></item>
 /// </list>
 /// </para>
-/// <para>
-/// Code emission uses C# 11 raw string literals. The closing <c>"""</c> sits at column 0
-/// so every template's content is authored with its real output indentation. Small helpers
-/// (<see cref="BuildDescriptor"/>, <see cref="GenStageMethod"/>, <see cref="GenFilterHoist"/>,
-/// <see cref="GenFilterChecks"/>) compose the larger templates.
-/// </para>
 /// </remarks>
 [Generator(LanguageNames.CSharp)]
 public sealed class BehaviorGenerator : IIncrementalGenerator
