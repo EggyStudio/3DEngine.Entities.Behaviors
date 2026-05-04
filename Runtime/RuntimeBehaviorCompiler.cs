@@ -15,7 +15,7 @@ namespace Engine;
 /// <remarks>
 /// <para>
 /// Source generation parity: at compile time the <c>BehaviorGenerator</c> incremental generator
-/// (<c>Modules/3DEngine.Entities.Behaviors/Generator/</c>) is consumed by the analyzer DLL; at runtime
+/// (<c>Modules/Engine.Entities.Behaviors/Generator/</c>) is consumed by the analyzer DLL; at runtime
 /// the <em>same</em> generator type is also compiled into <c>3DEngine.dll</c> (see the engine csproj's
 /// <c>Modules\**\Generator\**</c> Compile glob) so this compiler can attach it via
 /// <see cref="CSharpGeneratorDriver"/> and produce the same <c>BehaviorsRegistration.g.cs</c>
