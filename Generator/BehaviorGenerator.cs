@@ -282,6 +282,7 @@ public sealed class BehaviorGenerator : IIncrementalGenerator
                       var __cmd = world.Resource<Engine.EcsCommands>();
                       var __time = world.Resource<Engine.Time>();
                       var __input = world.Resource<Engine.Input>();
+                      var __physics = world.Resource<Engine.IPhysicsWorld>();
                       var __store = ecs.GetStorePublic<{{b.BehaviorFqn}}>();
                       var __count = __store.Count;
                       if (__count == 0) return;
@@ -295,7 +296,7 @@ public sealed class BehaviorGenerator : IIncrementalGenerator
                                   System.Math.Max(256, __count / (System.Environment.ProcessorCount * 4))),
                               __range =>
                               {
-                                  var ctx = new Engine.BehaviorContext(world, ecs, __cmd, __time, __input);
+                                  var ctx = new Engine.BehaviorContext(world, ecs, __cmd, __time, __input, __physics);
                                   for (int __i = __range.Item1; __i < __range.Item2; __i++)
                                   {
                                       int entity = __entities[__i];
@@ -309,7 +310,7 @@ public sealed class BehaviorGenerator : IIncrementalGenerator
                       }
                       else
                       {
-                          var ctx = new Engine.BehaviorContext(world, ecs, __cmd, __time, __input);
+                          var ctx = new Engine.BehaviorContext(world, ecs, __cmd, __time, __input, __physics);
                           for (int __i = 0; __i < __count; __i++)
                           {
                               int entity = __entities[__i];

@@ -51,14 +51,17 @@ public sealed class BehaviorContext
     /// <summary>Current frame input state (keyboard, mouse, text).</summary>
     public Input Input { get; }
 
+    /// <summary>Active physics world (rigid bodies, raycasts, gravity).</summary>
+    public IPhysicsWorld Physics { get; }
+
     /// <summary>Entity being processed for instance methods; <c>0</c> if not applicable.</summary>
     public int EntityId { get; set; }
 
     /// <summary>Creates a new <see cref="BehaviorContext"/> by resolving resources from the specified <paramref name="world"/>.</summary>
-    /// <param name="world">The <see cref="World"/> from which to resolve ECS, commands, time, and input resources.</param>
+    /// <param name="world">The <see cref="World"/> from which to resolve ECS, commands, time, input, and physics resources.</param>
     /// <exception cref="InvalidOperationException">
     /// Thrown if any required resource (<see cref="EcsWorld"/>, <see cref="EcsCommands"/>,
-    /// <see cref="Time"/>, <see cref="Input"/>) is missing from the world.
+    /// <see cref="Time"/>, <see cref="Input"/>, <see cref="IPhysicsWorld"/>) is missing from the world.
     /// </exception>
     public BehaviorContext(World world)
     {
@@ -67,6 +70,7 @@ public sealed class BehaviorContext
         Cmd = world.Resource<EcsCommands>();
         Time = world.Resource<Time>();
         Input = world.Resource<Input>();
+        Physics = world.Resource<IPhysicsWorld>();
     }
 
     /// <summary>
@@ -80,13 +84,15 @@ public sealed class BehaviorContext
     /// <param name="cmd">Pre-resolved <see cref="EcsCommands"/>.</param>
     /// <param name="time">Pre-resolved <see cref="Time"/>.</param>
     /// <param name="input">Pre-resolved <see cref="Input"/>.</param>
-    public BehaviorContext(World world, EcsWorld ecs, EcsCommands cmd, Time time, Input input)
+    /// <param name="physics">Pre-resolved <see cref="IPhysicsWorld"/>.</param>
+    public BehaviorContext(World world, EcsWorld ecs, EcsCommands cmd, Time time, Input input, IPhysicsWorld physics)
     {
         World = world;
         Ecs = ecs;
         Cmd = cmd;
         Time = time;
         Input = input;
+        Physics = physics;
     }
 
     /// <summary>Gets a typed resource from the world.</summary>
