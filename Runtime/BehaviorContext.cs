@@ -52,7 +52,7 @@ public sealed class BehaviorContext
     public Input Input { get; }
 
     /// <summary>Active physics world (rigid bodies, raycasts, gravity).</summary>
-    public IPhysicsWorld Physics { get; }
+    public PhysicsWorld Physics { get; }
 
     /// <summary>Entity being processed for instance methods; <c>0</c> if not applicable.</summary>
     public int EntityId { get; set; }
@@ -61,7 +61,7 @@ public sealed class BehaviorContext
     /// <param name="world">The <see cref="World"/> from which to resolve ECS, commands, time, input, and physics resources.</param>
     /// <exception cref="InvalidOperationException">
     /// Thrown if any required resource (<see cref="EcsWorld"/>, <see cref="EcsCommands"/>,
-    /// <see cref="Time"/>, <see cref="Input"/>, <see cref="IPhysicsWorld"/>) is missing from the world.
+    /// <see cref="Time"/>, <see cref="Input"/>, <see cref="PhysicsWorld"/>) is missing from the world.
     /// </exception>
     public BehaviorContext(World world)
     {
@@ -70,7 +70,7 @@ public sealed class BehaviorContext
         Cmd = world.Resource<EcsCommands>();
         Time = world.Resource<Time>();
         Input = world.Resource<Input>();
-        Physics = world.Resource<IPhysicsWorld>();
+        Physics = world.Resource<PhysicsWorld>();
     }
 
     /// <summary>
@@ -84,8 +84,8 @@ public sealed class BehaviorContext
     /// <param name="cmd">Pre-resolved <see cref="EcsCommands"/>.</param>
     /// <param name="time">Pre-resolved <see cref="Time"/>.</param>
     /// <param name="input">Pre-resolved <see cref="Input"/>.</param>
-    /// <param name="physics">Pre-resolved <see cref="IPhysicsWorld"/>.</param>
-    public BehaviorContext(World world, EcsWorld ecs, EcsCommands cmd, Time time, Input input, IPhysicsWorld physics)
+    /// <param name="physics">Pre-resolved <see cref="PhysicsWorld"/>.</param>
+    public BehaviorContext(World world, EcsWorld ecs, EcsCommands cmd, Time time, Input input, PhysicsWorld physics)
     {
         World = world;
         Ecs = ecs;

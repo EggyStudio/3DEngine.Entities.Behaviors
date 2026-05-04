@@ -282,7 +282,7 @@ public sealed class BehaviorGenerator : IIncrementalGenerator
                       var __cmd = world.Resource<Engine.EcsCommands>();
                       var __time = world.Resource<Engine.Time>();
                       var __input = world.Resource<Engine.Input>();
-                      var __physics = world.Resource<Engine.IPhysicsWorld>();
+                      var __physics = world.Resource<Engine.PhysicsWorld>();
                       var __store = ecs.GetStorePublic<{{b.BehaviorFqn}}>();
                       var __count = __store.Count;
                       if (__count == 0) return;
